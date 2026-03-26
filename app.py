@@ -1,109 +1,160 @@
-# ------------------------------------------------------------
-# Instagram Info API — Credit: Anmol (@FOREVER_HIDDEN)
-# ------------------------------------------------------------
-
-from flask import Flask, jsonify, request
+import os
 import requests
-import time
-from functools import lru_cache
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-@lru_cache(maxsize=1024)
-def fetch_instagram_profile(username, proxy=None):
-    url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "x-ig-app-id": "936619743392459",
-        "Referer": f"https://www.instagram.com/{username}/",
-        # নিচের লাইনে আপনার আসল sessionid বসাতে হবে, তা না হলে request_failed আসবে
-        # "Cookie": "sessionid=আপনার_আসল_সেশন_আইডি_এখানে;"
-    }
+app.config['JSON_SORT_KEYS'] = False
+if hasattr(app, 'json'):
+    app.json.sort_keys = False
 
-    session = requests.Session()
-    proxies = {"http": proxy, "https": proxy} if proxy else None
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "AIzaSyAAgbg_JXUaB711YdQBBJ_CdPmFpdpGf2o")
+TIMEOUT_SECONDS = 10
 
-    backoff = 1
-    for attempt in range(4):
-        try:
-            resp = session.get(url, headers=headers, timeout=10, proxies=proxies)
-            if resp.status_code == 200:
-                return resp.json()
-            elif resp.status_code in (429, 403):
-                # rate limited or blocked
-                time.sleep(backoff)
-                backoff *= 2
-            elif resp.status_code == 404:
-                return {"error": "not_found", "status_code": 404}
-            else:
-                return {
-                    "error": "http_error",
-                    "status_code": resp.status_code,
-                    "body": resp.text[:500],
-                }
-        except requests.RequestException:
-            time.sleep(backoff)
-            backoff *= 2
-    return {"error": "request_failed"}
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "Developer": "Riduanul Islam",
+        "TelegramBot": "https://t.me/RiduanFFBot",
+        "TelegramChannel": "https://t.me/RiduanOfficialBD",
+        "Project": "YouTube Channel Info API",
+        "Message": "Welcome to YouTube Channel Info API",
+        "API_Usage_Guide": {
+            "API_Format": {
+                "Get_Channel_Info": "/api/yt?channel=[Channel_Name_or_ID]"
+            },
+            "Examples": {
+                "By_Name": "/api/yt?channel=mrtripler",
+                "By_ID": "/api/yt?channel=UCx8uvG6fu2ocH6zOX9dkkSg"
+            }
+        }
+    })
 
+def get_channel_id(name_or_id):
+    if name_or_id.startswith("UC"):
+        return name_or_id
 
-@app.route("/api/insta/<username>", methods=["GET"])
-def insta_info(username):
-    proxy = request.args.get("proxy")
-    data = fetch_instagram_profile(username, proxy=proxy)
-    if data is None:
-        return jsonify({"error": "no_response"}), 502
+    search_url = f"https://www.googleapis.com/youtube/v3/search?part=id&type=channel&q={name_or_id}&key={YOUTUBE_API_KEY}"
+    resp = requests.get(search_url, timeout=TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    data = resp.json()
+    
+    if data.get("items"):
+        return data["items"][0]["id"].get("channelId")
+    return None
 
-    if "error" in data:
-        return jsonify(data), (data.get("status_code") or 400)
+def get_channel_info(channel_id):
+    url = f"https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&id={channel_id}&key={YOUTUBE_API_KEY}"
+    r = requests.get(url, timeout=TIMEOUT_SECONDS)
+    r.raise_for_status()
+    return r.json()
+
+def get_recent_videos(channel_id):
+    url = (
+        f"https://www.googleapis.com/youtube/v3/search?key={YOUTUBE_API_KEY}"
+        f"&channelId={channel_id}&part=snippet,id&order=date&maxResults=10"
+    )
+    r = requests.get(url, timeout=TIMEOUT_SECONDS)
+    r.raise_for_status()
+    return r.json()
+
+def check_live_status(channel_id):
+    url = (
+        f"https://www.googleapis.com/youtube/v3/search?part=snippet&channelId={channel_id}"
+        f"&eventType=live&type=video&key={YOUTUBE_API_KEY}"
+    )
+    r = requests.get(url, timeout=TIMEOUT_SECONDS)
+    r.raise_for_status()
+    data = r.json()
+    
+    if data.get("items"):
+        live_vid = data["items"][0]
+        vid = live_vid["id"].get("videoId")
+        return {
+            "status": "LIVE 🔴",
+            "video_id": vid,
+            "title": live_vid["snippet"].get("title"),
+            "url": f"https://youtu.be/{vid}"
+        }
+    return {"status": "OFFLINE ⚫"}
+
+@app.route("/api/yt", methods=["GET"])
+def yt_api():
+    query = request.args.get("channel")
+    if not query:
+        return jsonify({"error": "Missing parameter 'channel'"}), 400
 
     try:
-        user = data.get("data", {}).get("user") or data.get("user") or data.get("data")
-        if not user:
-            return jsonify({"raw": data})
+        channel_id = get_channel_id(query)
+        if not channel_id:
+            return jsonify({"error": "Channel not found"}), 404
+
+        info = get_channel_info(channel_id)
+        if not info.get("items"):
+            return jsonify({"error": "No channel data available"}), 404
+
+        ch = info["items"][0]
+        snippet = ch.get("snippet", {})
+        stats = ch.get("statistics", {})
+
+        live_data = check_live_status(channel_id)
+        live_status = live_data["status"]
+
+        recents = get_recent_videos(channel_id)
+        vids = []
+        last_video_date = None
+        
+        for v in recents.get("items", []):
+            vid = v.get("id", {}).get("videoId")
+            if not vid:
+                continue
+            sn = v.get("snippet", {})
+            published_at = sn.get("publishedAt")
+            
+            vids.append({
+                "video_id": vid,
+                "title": sn.get("title"),
+                "published_at": published_at,
+                "thumbnail": sn.get("thumbnails", {}).get("high", {}).get("url"),
+                "url": f"https://youtu.be/{vid}"
+            })
+
+            if not last_video_date:
+                last_video_date = published_at
 
         out = {
-            "id": user.get("id"),
-            "username": user.get("username"),
-            "full_name": user.get("full_name"),
-            "biography": user.get("biography"),
-            "is_private": user.get("is_private"),
-            "is_verified": user.get("is_verified"),
-            "profile_pic_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url"),
-            "followers_count": (user.get("edge_followed_by", {}).get("count") or user.get("followers_count")),
-            "following_count": (user.get("edge_follow", {}).get("count") or user.get("following_count")),
-            "media_count": (user.get("media_count") or user.get("edge_owner_to_timeline_media", {}).get("count")),
-            "recent_media": [],
+            "Developer": "Riduanul Islam",
+            "TelegramBot": "https://t.me/RiduanFFBot",
+            "TelegramChannel": "https://t.me/RiduanOfficialBD",
+            "channel_name": snippet.get("title"),
+            "username": snippet.get("customUrl"),  
+            "total_videos": stats.get("videoCount"),
+            "subscribers": stats.get("subscriberCount"),
+            "views": stats.get("viewCount"),
+            "live_status": live_status,
+            "channel_id": channel_id,
+            "creation_date": snippet.get("publishedAt"),
+            "description": snippet.get("description"),
+            "country": snippet.get("country"),
+            "thumbnail": snippet.get("thumbnails", {}).get("high", {}).get("url"),
+            "last_video_date": last_video_date,
+            "recent_videos": vids
         }
 
-        media = user.get("edge_owner_to_timeline_media") or user.get("media") or {}
-        edges = media.get("edges") or media.get("items") or []
-        for e in edges[:8]:
-            node = e.get("node") if isinstance(e, dict) and e.get("node") else e
-            if not node:
-                continue
-            caption = None
-            if node.get("edge_media_to_caption"):
-                edges_caption = node["edge_media_to_caption"].get("edges") or []
-                if edges_caption and "node" in edges_caption[0]:
-                    caption = edges_caption[0]["node"].get("text")
-            else:
-                caption = node.get("caption")
+        if live_status == "LIVE 🔴":
+            out["live_video"] = {
+                "video_id": live_data.get("video_id"),
+                "title": live_data.get("title"),
+                "url": live_data.get("url")
+            }
 
-            out["recent_media"].append({
-                "id": node.get("id"),
-                "shortcode": node.get("shortcode"),
-                "display_url": node.get("display_url") or node.get("display_src"),
-                "taken_at": node.get("taken_at_timestamp") or node.get("taken_at"),
-                "caption": caption,
-            })
         return jsonify(out)
-    except Exception as exc:
-        return jsonify({
-            "error": "parse_error",
-            "details": str(exc),
-            "raw": data
-        }), 500
 
-# Vercel-এর জন্য নিচের অংশগুলোর আর প্রয়োজন নেই, তাই বাদ দেওয়া হয়েছে।
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": "Third-party API request failed", "details": str(e)}), 502
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
